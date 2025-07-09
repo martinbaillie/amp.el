@@ -4,18 +4,18 @@
 
 ;; Author: Shane Kennedy
 ;; Version: 1.0.0
-;; Package-Requires: ((emacs "28.1"))
+;; Package-Requires: ((emacs "28.1") (vterm "0.0.1"))
 ;; Keywords: tools, development, ai
 
 ;;; Commentary:
 
 ;; This package provides an interactive command to run the Amp CLI
-;; in a terminal buffer. If the amp command is not found, it will
+;; in a vterm buffer. If the amp command is not found, it will
 ;; attempt to install it via npm.
 
 ;;; Code:
 
-(require 'term)
+(require 'vterm)
 (require 'cl-lib)
 (require 'filenotify)
 
@@ -83,6 +83,13 @@
   (amp--parse-output-for-files output)
   output)
 
+(defun amp--monitor-vterm-output (buffer)
+  "Monitor vterm BUFFER output for file modifications."
+  (when (and buffer (buffer-live-p buffer) (get-buffer-process buffer))
+    (with-current-buffer buffer
+      (let ((output (buffer-substring-no-properties (point-min) (point-max))))
+        (amp--parse-output-for-files output)))))
+
 (defun amp--get-project-root ()
   "Get the current project root directory."
   (cond
@@ -139,26 +146,25 @@
   (let* ((buffer-name (amp--get-buffer-name))
          (buffer (get-buffer buffer-name))
          (project-root (amp--get-project-root)))
-    (if (and buffer (term-check-proc buffer))
+    (if (and buffer (get-buffer-process buffer))
         (display-buffer buffer)
       (progn
         (when buffer (kill-buffer buffer))
-        ;; Set environment variables before creating terminal
-        (setenv "TERM" "dumb")
+        ;; Set environment variables before creating vterm
         (setenv "NO_COLOR" "1")
         (setenv "CI" "1")
-        ;; Set default-directory to project root before creating terminal
+        ;; Set default-directory to project root before creating vterm
         (let ((default-directory project-root))
-          (setq buffer (make-term (substring buffer-name 1 -1) "amp"))
+          (setq buffer (generate-new-buffer buffer-name))
           (with-current-buffer buffer
-            (rename-buffer buffer-name)
             ;; Ensure buffer's default-directory is set to project root
             (setq default-directory project-root)
-            ;; Add output filter to watch for file modifications
-            (add-hook 'comint-output-filter-functions 'amp--output-filter nil t)))
+            (vterm-mode)
+            (vterm-send-string "amp")
+            (vterm-send-return)
+            ;; Set up periodic output monitoring for file changes
+            (run-with-timer 1.0 1.0 'amp--monitor-vterm-output buffer)))
         (set-buffer buffer)
-        (term-mode)
-        (term-char-mode)
         (display-buffer buffer)))
     buffer))
 
@@ -167,7 +173,7 @@
   (cl-remove-if-not
    (lambda (buf)
      (and (string-match "^\\*amp-.*\\*$" (buffer-name buf))
-          (with-current-buffer buf (term-check-proc buf))))
+          (get-buffer-process buf)))
    (buffer-list)))
 
 (defun amp--choose-amp-buffer ()
@@ -204,34 +210,34 @@
          (current-buffer-name (amp--get-buffer-name))
          (buffer (get-buffer current-buffer-name)))
     ;; If current project has an amp buffer, use it
-    (if (and buffer (term-check-proc buffer))
+    (if (and buffer (get-buffer-process buffer))
         (progn
           (with-current-buffer buffer
-          (term-send-string (get-buffer-process buffer) cleaned-text)
-          (term-send-string (get-buffer-process buffer) "\n"))
+          (vterm-send-string cleaned-text)
+          (vterm-send-return))
           (amp--display-and-focus-buffer buffer))
       ;; Otherwise, try to find any amp buffer or ask user to choose
       (let ((chosen-buffer (amp--choose-amp-buffer)))
         (cond
          ((bufferp chosen-buffer)
-          (with-current-buffer chosen-buffer
-            (term-send-string (get-buffer-process chosen-buffer) cleaned-text)
-            (term-send-string (get-buffer-process chosen-buffer) "\n"))
-          (amp--display-and-focus-buffer chosen-buffer))
+         (with-current-buffer chosen-buffer
+         (vterm-send-string cleaned-text)
+         (vterm-send-return))
+         (amp--display-and-focus-buffer chosen-buffer))
          ((eq chosen-buffer 'create-new)
           ;; User chose to create new process, start one for current project
           (amp--start-terminal)
           (setq buffer (get-buffer current-buffer-name))
           (when buffer
-            ;; Wait for process to be ready before sending text
-            (run-with-timer 1.0 nil
-                           (lambda ()
-                           (when (and buffer (term-check-proc buffer))
-                           (with-current-buffer buffer
-                           (term-send-string (get-buffer-process buffer) cleaned-text)
-                           (term-send-string (get-buffer-process buffer) "\n"))
-                           (amp--display-and-focus-buffer buffer))))
-            (amp--display-and-focus-buffer buffer))
+          ;; Wait for process to be ready before sending text
+          (run-with-timer 1.0 nil
+          (lambda ()
+          (when (and buffer (get-buffer-process buffer))
+          (with-current-buffer buffer
+          (vterm-send-string cleaned-text)
+          (vterm-send-return))
+          (amp--display-and-focus-buffer buffer))))
+          (amp--display-and-focus-buffer buffer))
          (t
           ;; User chose not to create a process, do nothing
           nil)))))))
@@ -337,7 +343,7 @@
 
 ;;;###autoload
 (defun amp ()
-  "Start the amp CLI in the current project as a terminal buffer.
+  "Start the amp CLI in the current project as a vterm buffer.
 If amp CLI is not installed, attempt to install it via npm."
   (interactive)
   (if (amp--check-installation)
